@@ -1,0 +1,310 @@
+#!/usr/bin/perl
+#    Big Sister network monitor
+#    Copyright (C) 1998  Thomas Aeby
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+
+#=============================================================================
+#
+$BigSister::common::Usage	  = "[-D level] [-b basedir]";
+#
+#=============================================================================
+use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/bin"; use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/uxmon"; #inslib
+@BigSister::common::options = (  );
+use BigSister::common;
+use Statusmon::bs_evgen;
+proginit();
+
+use FileHandle;
+use strict;
+require bscgi;
+
+my %textstati = ( 0, "red", 1, "yellow", 2, "purple", 3, "red" );
+my $evgen = new Statusmon::bs_evgen;
+
+my $dl = $BigSister::common::dl;
+
+$ENV{PATH} = "$BigSister::common::fs{'bin'}:".$ENV{PATH};
+
+bscgi::mainloop( \&one_pass, "white_bg,static_lamps" );
+
+sub one_pass {
+    my( $skin, %cgivars ) = @_;
+    $evgen->init();
+    $evgen->load_state();
+
+    my @alarms;
+    my $ref;
+
+    foreach $ref (@{$evgen->{"new_alarms"}}) {
+	$ref->{"queue"} = "new";
+	push( @alarms, $ref );
+    }
+
+    foreach $ref (@{$evgen->{"old_alarms"}}) {
+	$ref->{"queue"} = "old";
+	push( @alarms, $ref );
+    }
+
+    foreach $ref (@{$evgen->{"alarms"}}) {
+	$ref->{"queue"} = "active";
+	push( @alarms, $ref );
+    }
+
+
+    my $i;
+
+    my $text = alarms( $BigSister::common::display, $skin, \@alarms, \%cgivars );
+
+    unless( substr( $text, 0, 9 ) eq "Location:" ) {
+	print "Content-Type: text/html\n\n";
+    }
+    open OUT, ">/tmp/x";
+    print $text;
+    print OUT $text;
+}
+
+
+sub alarms {
+    my( $disp, $skin, $alarm, $vars ) = @_;
+    my( $read, @alarms, $text, $i );
+
+    my %cgivars = %$vars;
+    my @text = ();
+    my $redirect = 0;
+    @alarms = sort { $a->{"queue"}.sprintf("%03d",$a->{"prio"}).$a->{"host"}.$a->{"item"}.$a->{"text"} <=> $b->{"queue"}.$b->{"host"}.$b->{"item"}.$b->{"text"} } @$alarm;
+    foreach $alarm (@alarms) {
+	my %alarm = %$alarm;
+	$alarm{"text"} .= "&nbsp;";
+	my $encid = $disp->encode( $alarm{"id"} );
+	if( $vars->{"fullid"} eq $alarm{"id"} ) {
+	    my $what;
+	    my @what = ( [ "repeatprio", "n", "Repeat Prio." ],
+			   [ "_next_repetition", "t", "Next Reminder" ],
+			   [ "_dequeue", "t", "Dequeue at" ],
+			   [ "norepeat", "t", "Not again till" ],
+			   [ "ack_user", "c", "Acked by" ],
+			   [ "ack_mode", "c", "Ack mode" ],
+			   [ "ack_until", "t", "Acked until" ],
+			   [ "ack_text", "c", "Ack text" ] );
+	    if( $alarm{"queue"} eq "new" ) {
+		push( @what, [ "postpone", "t", "Postponed to" ],
+			[ "delay", "t", "Delayed to" ] );
+	    }
+	    if( $vars->{"mode"} eq "ack" ) {
+		unshift( @text, $disp->replace_vars( $skin, {
+		    "ID" => $alarm{"id"},
+		    "ENC_ID" => $encid,
+		    "USER" => $ENV{"REMOTE_USER"},
+		    "ENC_USER" => $disp->encode( $ENV{"REMOTE_USER"} )
+		    }, $skin->{"alarm_ack_form.proto"} ) );
+	    } else {
+		unshift( @text, $disp->replace_vars( $skin, {
+		    "ID" => $alarm{"id"},
+		    "ENC_ID" => $encid,
+		    }, $skin->{"alarm_details_action.proto"} ) );
+	    }
+	    foreach $what (@what) {
+		my( $var, $t, $text ) = @$what;
+		next unless( defined( $alarm{$var} ) );
+		my $val = $alarm{$var};
+		if( $t eq "t" ) {
+		    next unless( $val );
+		    if( $val < 0 ) {
+			$val = "forever";
+		    } else {
+			$val = localtime($val);
+		    }
+		};
+		unshift( @text, $disp->replace_vars( $skin, {
+			"ID" => $alarm{"id"},
+			"ENC_ID" => $encid,
+			"FIELD" => $text,
+			"CONT" => $val
+			}, $skin->{"alarm_details.proto"} ) );
+	    }
+	    if( $vars->{"mode"} eq "ack_reply" ) {
+		my $err = &acknowledge( $alarm{"host"}.".".$alarm{"item"}, $vars );
+		($redirect = 1) unless( $err || $vars->{"nonactive"} );
+		($err = "Acknowledged ...") unless( $err );
+		unshift( @text, $disp->replace_vars( $skin, {
+			"ID" => $alarm{"id"},
+			"ENC_ID" => $encid,
+			"ERROR", $err,
+			}, $skin->{"alarm_ack_error.proto"} ) );
+		$vars->{"REFRESH_URL"} = ";\@ALARM_PATH.inc\@";
+	    }
+	}
+	unshift( @text, $disp->replace_vars( $skin, {
+		"HOST" => $alarm{"host"},
+		"ITEM" => $alarm{"item"},
+		"TEXT" => $alarm{"text"},
+		"PRIO" => $alarm{"prio"},
+		"ID" => $alarm{"id"},
+		"ENC_ID" => $disp->encode( $alarm{"id"} ),
+		"STATUS" => $textstati{$alarm{"status"}},
+		"ACK" => (($alarm{"ack_mode"}||$alarm{"_ignored"})?"checked":"not_checked")
+		}, $skin->{"alarm_".$alarm->{"queue"}.".proto"} ) );
+    }
+    $text = join( "", @text );
+    $text =~ s/\|\>/\<BR\>/g;
+    $vars->{"TEXT"} = $text;
+
+    $text = "";
+    @alarms = values %{$evgen->{"ign_acks"}};
+    foreach $alarm( @alarms ) {
+	my( $user, $until, $host, $item, $atxt );
+	$user = $alarm->{"user"};
+	$until = $alarm->{"until"};
+	$host = $alarm->{"host"};
+	$item = $alarm->{"item"};
+	$until = ($until<0)?"forever":(scalar localtime($until));
+	$atxt = $alarm->{"text"};
+	$atxt =~ s/^.*?:\d\d \d\d\d\d //;
+	$text .= $disp->replace_vars( $skin, {
+		"HOST" => $host,
+		"ITEM" => $item,
+		"TEXT" => $atxt,
+		"USER" => $user,
+		"UNTIL" => $until,
+		"ID" => "i$host.$item",
+		"ENC_ID" => $disp->encode( "i$host.$item" )
+		}, $skin->{"alarm_ign.proto"}  );
+	if( $vars->{"fullid"} eq "i$host.$item" ) {
+	    if( $vars->{"mode"} eq "igndel" ) {
+		$vars->{"FOR"} = "00:00";
+		$vars->{"MOD"} = "ign";
+		my $err = &acknowledge( $host.".".$item, $vars );
+		($redirect = 1) unless( $err || $vars->{"nonactive"} );
+		($err = "Acknowledged ...") unless( $err );
+		$text .= $disp->replace_vars( $skin, {
+			"ERROR", $err,
+			}, $skin->{"alarm_ign_error.proto"} );
+		$vars->{"REFRESH_URL"} = ";\@ALARM_PATH.inc\@";
+	    }
+	    $text .= $disp->replace_vars( $skin, {
+		    "HOST" => $host,
+		    "ITEM" => $item,
+		    "TEXT" => $alarm->{"text"},
+		    "USER" => $user,
+		    "UNTIL" => $until,
+		    "ID" => "i$host.$item",
+		    "ENC_ID" => $disp->encode( "i$host.$item" )
+		    }, $skin->{"alarm_ign_full.proto"}  );
+  	} 
+    }
+    $vars->{"IGNTEXT"} = $text;
+
+    if( $vars->{"MOD"} eq "newmaint" ) {
+	my $err;
+	$vars->{"MOD"} = "maint";
+	if( !( $vars->{"HOST"} =~ /^[a-z0-9\-:_,\.]+$/i ) ) {
+	    $err = "Invalid host name";
+	}
+	elsif( !( $vars->{"CHECK"} =~ /^([a-z0-9\-:_,]+|\*)$/i ) ) {
+	    $err = "Invalid check";
+	}
+	else {
+	    $err = acknowledge( ($vars->{"HOST"}).".".($vars->{"CHECK"}), $vars );
+	    ($redirect = 1) unless( $err || $vars->{"nonactive"} );
+	}
+	($err = "Set into maintenance mode ...") unless( $err );
+	$vars->{"MAINT_ERROR"} = $disp->replace_vars( $skin, {
+		"ERROR", $err,
+		}, $skin->{"alarm_maint_error.proto"} );
+    }
+    foreach $i ( keys %$vars ) {
+	$vars->{"ENC_".$i} = $disp->encode( $vars->{$i} );
+    }
+    if( $redirect ) {
+	$cgivars{"nonactive"} = 1;
+        my $newurl = ($skin->{"ALARM_PATH.inc"})."?".($disp->encode_args( \%cgivars ));
+	my $base = bscgi::myurl();
+	return "Location: $base$newurl\r\n\r\n";
+    }
+        
+    return $disp->replace_vars( $skin, $vars, $skin->{"alarm.proto"} );
+}
+
+
+
+sub acknowledge {
+    my( $check, $cgivars ) = @_;
+    my( $time, $user, $comment, $mode, $port, $host, $ok );
+    require FileHandle;
+    require Socket;
+    import Socket;
+
+    return undef if( $cgivars->{"nonactive"} );
+    if( $cgivars->{"FOREVER"} ) {
+	$time = "forever";
+    }
+    elsif( $cgivars->{"FOR"} =~ /^\d+:\d+$/ ) {
+	$time = $cgivars->{"FOR"};
+    }
+    else {
+	$time = "01:00";
+    }
+    $user = $cgivars->{"USER"};
+    $user =~ s/[\s\t]/_/g;
+    unless( $user ) { return( "you must supply user name" ); }
+    $comment = $cgivars->{"COMMENT"};
+    if( $cgivars->{"MOD"} =~ /^(ack|del|ign|maint)$/ ) {
+	$mode = $1;
+    }
+    else {
+	$mode = "ack";
+    }
+    open( IN, "<$BigSister::common::fs{'var'}/grouping" );
+    $port = 1984;
+    if( $BigSister::common::resources{"port"} ) {
+	$port = $BigSister::common::resources{"port"};
+    }
+    else {
+	while( <IN> ) {
+	    if( /^set port=(\d+)/ ) {
+		$port = $1;
+		last;
+	    }
+        }
+    }
+    $host = "localhost";
+    if( $BigSister::common::resources{"server"} ) {
+	$host = $BigSister::common::resources{"server"};
+    }
+    $host = inet_aton( $host );
+    $ok = 0;
+    eval {
+	my $fh = FileHandle->new();
+	socket($fh, &PF_INET(), &SOCK_STREAM(), 6 ) || die;
+        $SIG{'ALRM'} = sub { die; };
+        Platform::bsalarm(10);
+
+        if( Platform::bsconnect($fh, scalar sockaddr_in( $port, $host )) ) {
+	    print $fh "ack $check $time $user $mode $comment\n";
+        }
+	sleep 1;
+	close $fh;
+
+        Platform::bsalarm(0);
+	$ok = 1;
+    };
+    Platform::bsalarm(0);         
+    return( "Connection to Big Sister Server failed: $!" ) unless( $ok );
+    return undef;
+}
+
+

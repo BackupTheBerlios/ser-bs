@@ -1,0 +1,266 @@
+#!/usr/bin/perl
+#    Big Sister network monitor
+#    Copyright (C) 2000  Thomas Aeby
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+
+#=============================================================================
+#
+$BigSister::common::Usage	  = "[-D level]";
+#
+#=============================================================================
+
+@BigSister::common::options = ( );
+use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/bin"; use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/uxmon"; #inslib
+use BigSister::common;
+proginit();
+
+use strict;
+require bscgi;
+
+use Statusmon::Statusmon;
+use Statusmon::Grapher;
+use Statusmon::RRDi;
+
+my $dl = $BigSister::common::dl;
+
+my $grapher = new Statusmon::Grapher();
+my $rrd = new Statusmon::RRDi();
+
+my @colors = (
+    "0000FF",
+    "FF0000",
+    "000000",
+    "D0D020",
+    "FF00FF",
+    "00FFFF"
+);
+
+#   "20D020",
+bscgi::mainloop( \&one_pass, "structured_bg", 300 );
+
+
+sub one_pass {
+    my( $skin, %cgivars ) = @_;
+
+    my $days = $cgivars{"DAYS"};
+    my $host = $cgivars{"HOST"};
+    my $graph = $cgivars{"GRAPH"};
+    my $start = $cgivars{"START"};
+    my $mode = $cgivars{"MODE"};
+    my $end = $cgivars{"END"};
+    my $zoom = $cgivars{"ZOOM"};
+
+    if( $mode ne "html" ) { $mode = "graph"; }
+    unless( $zoom ) { $zoom = 100; }
+     
+    my @index = $grapher->get_index( $host );
+    my $maingraph = {};
+    for( my $i=0; $i<=$#index; $i++ ) {
+	$maingraph = $grapher->read_graphdef( $index[$i]->{"fileid"} ) if($index[$i]->{"graph-id"} eq $graph);
+	last if( $maingraph->{"graph"} );
+    }
+    unless( $maingraph->{"graph-id"} ) {
+	unavailable( $host, $graph );
+	return;
+    }
+
+    if( $mode eq "html" ) {
+	my $debug = "";
+	my $disp = $BigSister::common::display;
+	my $text = "";
+	my $args = '<input type=hidden name=HOST value="'.$host.'">'."\n";
+	foreach my $graph (@{$cgivars{"\@GRAPH"}}) {
+	    $args .= '<input type=hidden name=GRAPH value="'.$graph.'">'."\n";
+	}
+
+	my $dayoptions = "";
+	foreach my $option ( [ "0.25", "6 hours" ], [ "0.5", "12 hours" ], 
+			     [ "1", "1 day" ], [ "2", "2 days" ], [ "7", "1 week" ],
+			     [ "14", "2 weeks" ], [ "30", "1 month" ], [ "60", "2 months" ],
+			     [ "365", "1 year" ], [ 730, "2 years" ] ) {
+	    $dayoptions .= '<option value="'.($option->[0]).
+	    	'"'.(($option->[0] == $days)?" SELECTED":"").'>'.($option->[1]).'</option>'."\n";
+	}
+
+	my $zoomoptions = "";
+	foreach my $option ( [ 50, "50%" ], [ 75, "75%" ], [ 100, "100%" ], [ 125, "125%" ],
+			     [ 150, "150%" ], [ 175, "175%" ], [ 200, "200%" ] ) {
+	    $zoomoptions .= '<option value="'.($option->[0]).
+	    	'"'.(($option->[0] == $zoom)?" SELECTED":"").'>'.($option->[1]).'</option>'."\n";
+	}
+
+	my $linkargs = "HOST=".($disp->encode($host));
+	my $nodays = $linkargs;
+	if( $days ) { $linkargs .= "&DAYS=".($disp->encode($days)); }
+	my $nozoom = $linkargs;
+	$linkargs .= "&ZOOM=$zoom";
+	my $seq = int rand(999);
+
+	my $maxcombine = $maingraph->{"maxcombine"};
+	unless( $maxcombine ) { $maxcombine = 6; }
+	if( $maxcombine >= $#colors + 1 ) { $maxcombine = $#colors + 1; }
+
+	my $allgraphs = "";
+	foreach my $graph (@{$cgivars{"\@GRAPH"}}) {
+	    my @selindex = grep( ($_->{"graph-id"} eq $graph) && $_->{"fileid"}, @index );
+	    next unless( @selindex );
+	    my $maingraph = $grapher->read_graphdef( $selindex[0]->{"fileid"} );
+	    my $linkargs = $linkargs . "&GRAPH=".($disp->encode($graph));
+	    $text = "";
+	    for( my $i=0; $i <= $#selindex; $i += $maxcombine ) {
+		$text .= $disp->replace_vars( $skin, {
+		    "HOST" => $host,
+		    "GRAPH" => $graph,
+		    "DAYS" => $days,
+		    "DAYOPTIONS" => $dayoptions,
+		    "ZOOMOPTIONS" => $zoomoptions,
+		    "GENERALARGS" => $args,
+		    "IMAGEARGS" => $linkargs."&SEQ=$seq&MODE=graph&START=$i&END=".($i+$maxcombine)
+
+		}, $skin->{"graph_image.proto"} );
+	    }
+	    
+	    $allgraphs .= $disp->replace_vars( $skin, {
+		    "HOST" => $host,
+		    "GRAPH" => $graph,
+		    "DAYS" => $days,
+		    "DAYOPTIONS" => $dayoptions,
+		    "ZOOMOPTIONS" => $zoomoptions,
+		    "GENERALARGS" => $args,
+		    "TITLE" => ($maingraph->{"title"}),
+		    "TEXT" => $text
+	    }, $skin->{"graph_space.proto"} );
+	}
+	print "Content-Type: text/html\n\n";
+	print $disp->replace_vars( $skin, {
+	    "HOST" => $host,
+	    "GRAPH" => $graph,
+	    "DAYS" => $days,
+	    "ARGS" => $nodays."&MODE=html",
+	    "TITLE" => ($maingraph->{"title"}),
+	    "ZOOMIN" => $nozoom."&MODE=html&ZOOM=".($zoom+50),
+	    "ZOOMOUT" => $nozoom."&MODE=html&ZOOM=".($zoom-50),
+	    "DAYOPTIONS" => $dayoptions,
+	    "ZOOMOPTIONS" => $zoomoptions,
+	    "GENERALARGS" => $args,
+	    "DEBUG" => $debug,
+	    "TEXT" => $allgraphs
+	}, $skin->{"graph_page.proto"} );
+	exit(0);
+
+    }
+
+    @index = grep( $_->{"graph-id"} eq $graph, @index );
+    if( $end && ($#index >= $end ) ) {
+	splice( @index, $end );
+    }
+    if( $start ) {
+	splice( @index, 0, $start );
+    }
+
+    my @args = ( "--alt-y-grid" );
+
+    my $format = $maingraph->{"format"};
+    ($format = "png") unless( ($format eq "gif") || ($format eq "png") );
+    push( @args, "--imgformat", uc( $format ) );
+
+    my( $width, $height ) = split( "x", $maingraph->{"size"} );
+    ($width = 400) unless( $width );
+    ($height = 100) unless( $height );
+    $width = int( $width*$zoom/100 );
+    $height = int( $height*$zoom/100 );
+    push( @args, "--width", $width, "--height", $height );
+
+    push( @args, "--end", time, "--start", time - $days*24*3600 );
+
+    if( $maingraph->{"unit-label"} ) {
+	push( @args, "--vertical-label", $maingraph->{"unit-label"} );
+    }
+    if( $maingraph->{"unit-base"} ) {
+	push( @args, "--base", $maingraph->{"unit-base"} );
+    }
+
+    if( $maingraph->{"title"} ) {
+	push( @args, "--title", $maingraph->{"title"} );
+    }
+
+    my( $lower, $upper ) = split( /\.\./, $maingraph->{"scale"} );
+    if( ($lower ne "auto") && length($lower) ) {
+	push( @args, "--lower-limit", $lower );
+    }
+    if( ($upper ne "auto") && length($upper) ) {
+	push( @args, "--upper-limit", $upper );
+    }
+
+    for( my $i=0; $i<=$#index; $i++ ) {
+	my $graph = $index[$i];
+	push( @args, "DEF:v$i=".(Platform::filepath(($grapher->rrd_file( $graph )))).":a:AVERAGE" );
+    }
+
+    for( my $i=0; $i<=$#index; $i++ ) {
+	my $graph = $grapher->read_graphdef( $index[$i]->{"fileid"} );
+
+	my $legend = $graph->{"legend"};
+	$legend =~ s/:/ /g;
+        if ($graph->{"grtype"} =~ /stack/){
+            if ($i == 0){
+	       push( @args, "AREA:v$i#".($colors[$i]).($legend?":$legend":"") );
+            } else {
+	       push( @args, "STACK:v$i#".($colors[$i]).($legend?":$legend":"") );
+            }
+        } elsif ($graph->{"grtype"} =~ /area/){
+	    push( @args, "AREA:v$i#".($colors[$i]).($legend?":$legend":"") );
+        } else {
+	    push( @args, "LINE2:v$i#".($colors[$i]).($legend?":$legend":"") );
+        }
+    }
+
+    $| = 1;
+    print "Pragma: no-cache\n";
+    print "Cache-control: no-cache\n";
+    print "Content-Type: image/$format\n\n";
+    # binmode will fail if using FCGI;
+    eval {
+	binmode STDOUT;
+    };
+    my $tmp;
+    if( $Platform::has_fork ) {
+	open( GRAPH, "-|" );
+	$rrd->rrd_graph( "-", @args );
+    }
+    else {
+	$tmp = "/graph.$$";
+	$rrd->rrd_graph( Platform::filepath( $tmp ), @args );
+	open( _GRAPH, "<$tmp" );
+    }
+    binmode _GRAPH;
+    while( <_GRAPH> ) { print; }
+    close _GRAPH;
+    unlink $tmp if( $tmp );
+}
+
+
+
+sub unavailable {
+    my( $host, $graph ) = @_;
+
+    print "Content-Type: text/plain\n\n";
+    print "Graph for host $host, ID $graph unavailable\n";
+    return();
+}
+    
+

@@ -1,0 +1,634 @@
+#!/usr/bin/perl
+#    Big Sister network monitor
+#    Copyright (C) 1998  Thomas Aeby
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+
+#=============================================================================
+#
+$BigSister::common::Usage	  = "[-D level] [-b basedir]";
+#
+#=============================================================================
+@BigSister::common::options = (  );
+use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/bin"; use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/uxmon"; #inslib
+use BigSister::common;
+use Socket;
+proginit();
+
+use FileHandle;
+use strict;
+require bscgi;
+
+my $dl = $BigSister::common::dl;
+my $disp;
+my $bbdisp;
+my $bbconn;
+
+my $display = "localhost";
+
+my $menus = {
+    "groups" => {
+	"sort" => 1,
+	"TEXT" => "Hosts/Groups",
+	"SYMBOL" => "groups",
+	"FUNCTION" => "groups",
+	"submenu" => {
+	    "bygroup" => {
+		"sort" => 1,
+		"TEXT" => "by group",
+		"SUBF" => "bygroup",
+		"do"   => \&group_bygroup
+	    },
+	    "bysub" => {
+		"sort" => 2,
+		"TEXT" => "by subgroup",
+		"SUBF" => "bysub",
+		"do"   => \&group_bysub
+	    },
+	    "admin" => {
+		"sort" => 3,
+		"TEXT" => "administer groups",
+		"SUBF" => "admin",
+		"do"   => \&group_admin
+	    },
+	    "create" => {
+		"sort" => 4,
+		"TEXT" => "create group",
+		"SUBF" => "create",
+		"do"   => \&group_create
+	    },
+	}
+    },
+    "agents" => {
+	"sort" => 2,
+	"TEXT" => "Agents",
+	"SYMBOL" => "agents",
+	"FUNCTION" => "agents",
+	"submenu" => {
+	    "byagent" => {
+		"sort" => 1,
+		"TEXT" => "show monitors by agent",
+		"SUBF" => "byagent",
+		"do"   => \&checks_byagent
+	    },
+	    "bymonitor" => {
+		"sort" => 2,
+		"TEXT" => "show agents by monitor",
+		"SUBF" => "bymonitor",
+		"do"   => \&checks_bymonitor
+	    },
+	}
+    },
+    "help" => {
+	"sort" => 3,
+	"TEXT" => "Help",
+	"SYMBOL" => "help",
+	"FUNCTION" => "help",
+	"submenu" => {
+	    "about" => {
+		"sort" => 1,
+		"TEXT" => "About Webadmin",
+		"SUBF" => "about",
+		"do"   => \&help_about
+	    },
+	}
+    },
+#    "status" => {
+#	"sort" => 2,
+#	"TEXT" => "Status",
+#	"SYMBOL" => "status",
+#	"FUNCTION" => "status"
+#    }
+};
+
+$ENV{PATH} = "$BigSister::common::fs{'bin'}:".$ENV{PATH};
+
+bscgi::mainloop( \&one_pass, "structured_bg,static_lamps,webadmin", 400 );
+
+sub one_pass {
+    my( $skin, %cgivars ) = @_;
+    my( $page ) = {};
+
+    print "Content-Type: text/html\n\n";
+    $disp = $BigSister::common::display;
+
+    create_menu( $skin, $page, \%cgivars );
+    create_submenu( $skin, $page, \%cgivars );
+
+    if( $cgivars{"function"} && defined $menus->{$cgivars{"function"}}
+	&& $cgivars{"subf"} 
+	&& defined $menus->{$cgivars{"function"}}->{"submenu"}->{$cgivars{"subf"}} )
+    {
+	$menus->{$cgivars{"function"}}->{"submenu"}->{$cgivars{"subf"}}
+	  ->{"do"}->( $skin, $page, \%cgivars );
+    }
+    print $disp->replace_vars( $skin, $page, $skin->{"admin.proto"} );
+}
+
+
+sub create_menu {
+    my( $skin, $page, $cgivars ) = @_;
+
+    $page->{"TEXTMENU"} = "";
+    $page->{"SYMBOLMENU"} = "";
+
+    my $entry;
+    foreach $entry (sort { $menus->{$a}->{"sort"} <=> $menus->{$b}->{"sort"} } keys %$menus) {
+	my $entry = $menus->{$entry};
+	$entry->{"COLOR"} = 
+	    (($entry->{"FUNCTION"} eq $cgivars->{"function"})?"MENUSEL":"MENUNORM");
+	$page->{"TEXTMENU"} .= $disp->replace_vars( $skin, $entry,
+		$skin->{"admin_textmenuentry.proto"} );
+	$page->{"SYMBOLMENU"} .= $disp->replace_vars( $skin, $entry,
+		$skin->{"admin_symbolmenuentry.proto"} );
+    }
+}
+
+
+sub create_submenu {
+    my( $skin, $page, $cgivars ) = @_;
+
+    $page->{"SUBMENU"} = "";
+    return unless( $cgivars->{"function"} && defined $menus->{$cgivars->{"function"}} );
+    my $menu = $menus->{$cgivars->{"function"}}->{"submenu"};
+    my $entry;
+    foreach $entry (sort { $menu->{$a}->{"sort"} <=> $menu->{$b}->{"sort"} } keys %$menu) {
+	my $entry = $menu->{$entry};
+	$entry->{"FUNCTION"} = $cgivars->{"function"};
+	$entry->{"COLOR"} = 
+	    (($entry->{"SUBF"} eq $cgivars->{"subf"})?"MENUSEL":"MENUNORM");
+	$page->{"SUBMENU"} .= $disp->replace_vars( $skin, $entry,
+		$skin->{"admin_submenuentry.proto"} );
+    }
+}
+
+
+# ===============Groups=================
+
+sub group_create {
+    my( $skin, $page, $cgivars ) = @_;
+    my $messages;
+
+    load_grouping();
+    my $gdisp = $BigSister::common::grouping->{"disp"};
+
+    if( $cgivars->{"newgroup"} ) {
+	my $group = $cgivars->{"newgroup"};
+	my $name = $cgivars->{"name"};
+	my $create = 1;
+
+	unless( $group =~ /^[0-9a-z-\:_]+$/i ) {
+	    $messages .= "group ident contains invalid characters - please try again<BR>\n";
+	    $create = 0;
+	}
+	unless( $name ) {
+	    $messages .= "name not set - defaulting to $group<BR>\n";
+	    $name = $group;
+	}
+	if( $create ) {
+	    $messages .= "creating group $group ($name)<BR>\n";
+	    $gdisp->displayname( $group, $name );
+	    send_cmd( $display, "displayname $group $name" );
+	}
+    }
+
+    if( $messages ) {
+	$messages =  $disp->replace_vars( $skin, {
+	    "MESSAGE" => $messages
+	    }, $skin->{"admin_create_group_messages.proto"} ); 
+    }
+
+    $page->{"TEXT"} = $disp->replace_vars( $skin, {
+	"TITLE" => "Create Group",
+	"WHICH" => "create",
+	"MESSAGE" => $messages,
+    }, $skin->{"admin_create_group.proto"} );
+
+}
+
+
+
+sub group_admin {
+    my( $skin, $page, $cgivars ) = @_;
+    my $messages;
+    my $group;
+    my @groups;
+    my( $subs, $parents );
+
+    load_grouping();
+
+    my $enc_group = $cgivars->{"group"};
+    $enc_group =~ s/\"/\'/g;
+    my $gdisp = $BigSister::common::grouping->{"disp"};
+    my $filter = $cgivars->{"group"};
+    $filter =~ s/\*/.\*/g;
+    foreach $group ( sort $gdisp->enum_groups() ) {
+	eval {
+	    push( @groups, $group ) if( $group =~ /$filter/ );
+	}
+    }
+    unless( @groups ) {
+	$messages = "No matching group found<BR>";
+	undef $group;
+    }
+    else {
+        $group = $groups[0];
+	if( $cgivars->{"joingroup"} ) {
+	    $messages .= group_join( $skin, $page, $cgivars, $group, "join" )."<BR>\n";
+	}
+	if( $cgivars->{"leavegroup"} ) {
+	    $messages .= group_join( $skin, $page, $cgivars, $group, "leave" )."<BR>\n";
+	}
+	if( $#groups>0 ) {
+	    $messages .= "other matching groups: ".join( " ",
+		map { $disp->replace_vars( $skin, {
+		    "GROUP" => $_
+		}, $skin->{"groupref.proto"} ) } @groups[1..($#groups+1)] );
+	}
+
+	my $mode;
+	@groups = ();
+	my $list = $gdisp->get_members( $group );
+	push( @groups, @$list ) if( $list );
+	$list = $gdisp->get_groups( $group );
+	push( @groups, @$list ) if( $list );
+	my $join_groups = "";
+	foreach $mode ($gdisp->enum_groups()) {
+	    unless( grep( $_ eq $mode, @groups, $group ) ) {
+		$join_groups .= $disp->replace_vars( $skin, {
+		    "GROUP" => $mode,
+		    "NAME" => $gdisp->get_title($mode)
+		    }, $skin->{"admin_groupadmin_details_select.proto"} ); 
+	    }
+	}
+
+	foreach $mode ("subs_by_group","groups_by_sub") {
+	    my $list = ($mode eq "subs_by_group")
+			? ($gdisp->get_members( $group ))
+			: ($gdisp->get_groups( $group ));
+	    next unless( $list && @$list );
+	    @groups = @$list;
+	    my $groupi;
+	    my $table;
+	    foreach $groupi (@groups) {
+		$table .= $disp->replace_vars( $skin, {
+		    "GROUP" => $groupi,
+		    "NAME" => $gdisp->get_title( $groupi ),
+		    "SECTION" => $mode,
+		    "ENC_GROUP" => $enc_group
+		    }, $skin->{"admin_groupadmin_details_element.proto"} ); 
+	    }
+	    my $text= $disp->replace_vars( $skin, {
+		"TITLE" => (($mode eq "subs_by_group")?"Sub groups":"Parent groups")." of $group",
+		"TABLE_BODY" => $table,
+		"OPTIONS" => $join_groups,
+		"ENC_GROUP" => $enc_group,
+		"SECTION" => $mode
+		}, $skin->{"admin_groupadmin_details.proto"} );
+	    if( $mode eq "subs_by_group" ) {
+		$subs = $text;
+	    }
+	    else {
+		$parents = $text;
+	    }
+	}
+    }
+
+    if( $messages ) {
+	$messages =  $disp->replace_vars( $skin, {
+	    "MESSAGE" => $messages
+	    }, $skin->{"admin_groupadmin_messages.proto"} ); 
+    }
+
+    $page->{"TEXT"} = $disp->replace_vars( $skin, {
+	"TITLE" => "Group Administration".($group?" - $group":""),
+	"WHICH" => "admin",
+	"MESSAGE" => $messages,
+	"SUBS" => $subs,
+	"PARENTS" => $parents,
+	"ENC_GROUP" => $enc_group
+    }, $skin->{"admin_groupadmin.proto"} );
+}
+
+
+
+sub group_join {
+    my( $skin, $page, $cgivars, $group, $mode ) = @_;
+
+    my $join = $cgivars->{"${mode}group"};
+    my $gdisp = $BigSister::common::grouping->{"disp"};
+    unless( $gdisp->get_title($join) ) {
+	return( "Sorry - cannot $mode non-existing group $join" );
+    }
+
+    if( $cgivars->{"section"} eq "subs_by_group" ) {
+	my $i = $join;
+	$join = $group;
+	$group = $i;
+    }
+    if( $mode eq "join" ) {
+	$gdisp->join_group( $group, $join );
+	send_cmd( $display, "join $group $join" );
+    }
+    else {
+	$gdisp->leave_group( $group, $join );
+	send_cmd( $display, "leave $group $join" );
+    }
+    return( "$group ${mode}s group $join" );
+}
+
+
+
+sub group_bygroup {
+    my( $skin, $page, $cgivars ) = @_;
+
+    group_byall( $skin, $page, $cgivars,
+	"subs_by_group", "bygroup", "Groups by parent group" );
+}
+
+
+sub group_bysub {
+    my( $skin, $page, $cgivars ) = @_;
+
+    group_byall( $skin, $page, $cgivars,
+	"groups_by_sub", "bysub", "Groups by sub group" );
+}
+
+
+sub group_byall {
+    my( $skin, $page, $cgivars,
+	$array, $which, $title ) = @_;
+
+    unless( load_grouping() ) {
+	;
+    }
+    my $gdisp = $BigSister::common::grouping->{"disp"};
+    my $body = "";
+    my $sub;
+    foreach $sub (sort $gdisp->enum_groups()) {
+	my $group;
+	my $i=1;
+	my $text = "";
+	my $list = ($array eq "subs_by_group")
+		    ? ($gdisp->get_members( $sub ))
+		    : ($gdisp->get_groups( $sub ));
+	next unless( $list && @$list );
+	foreach $group (sort @{$list}) {
+	    unless( $i++ % 8 ) {
+		$i=1;
+		$text .= $disp->replace_vars( $skin, {}, 
+			$skin->{$which."_newline.proto"} );
+	    }
+	    $text .= $disp->replace_vars( $skin, {
+		"GROUP" => $group,
+		"NAME" => $gdisp->get_title($group)
+		}, $skin->{$which."_group.proto"} );
+	}
+	$body .= $disp->replace_vars( $skin, {
+	    "GROUP" => $sub,
+	    "NAME" => $gdisp->get_title($sub),
+	    "GROUPS"=>$text}, 
+	    $skin->{$which."_element.proto"} );
+    }
+	    
+    $page->{"TEXT"} = $disp->replace_vars( $skin, {
+	"TITLE" => $title,
+	"WHICH" => $which,
+	"TABLE_BODY" => $body,
+	"MTIME" => (scalar localtime( $BigSister::common::grouping->{"mtime"} ))
+    }, $skin->{"admin_grouping.proto"} );
+}
+
+
+
+sub load_grouping {
+    my $file = $BigSister::common::fs{'var'}."/grouping";
+    my $grp, $disp;
+
+    return(0) unless( -f $file );
+    my $mtime = ((stat($file))[9]);
+    return(1) if( defined $BigSister::common::grouping
+	&& $mtime == $BigSister::common::grouping->{"mtime"} );
+    require Statusmon::grouping;
+    $BigSister::common::grouping = $grp = { 
+	"mtime" => $mtime,
+	"file" => $file,
+	"disp" => new Statusmon::grouping()
+    };
+    $BigSister::common::dl=100;
+    $grp->{"disp"}->read_groups( $file );
+    $BigSister::common::dl=0;
+}
+
+
+
+
+
+# ===============Help=================
+sub help_about {
+    my( $skin, $page, $cgivars ) = @_;
+
+    $page->{"TEXT"} = $disp->replace_vars( $skin, {
+	"TITLE" => "About Webadmin",
+    }, $skin->{"admin_help_about.proto"} );
+}
+
+
+
+# ===============Agents=================
+
+sub checks_bymonitor {
+    my( $skin, $page, $cgivars ) = @_;
+
+    unless( load_agentlog() ) {
+	;
+    }
+    my $body = "";
+    my $check;
+    my $formerhost = "";
+    foreach $check (sort 
+	{ $a->{"HOST"}." ".$a->{"CHECK"} cmp $b->{"HOST"}." ".$b->{"CHECK"} }
+	@{$BigSister::common::agentlog->{"checks"}}) {
+
+	my $text = "";
+
+	my $agents = $check->{"agents"};
+	my $agent;
+	my $i=1;
+	foreach $agent (@$agents) {
+	    unless( $i++ % 4 ) {
+		$i=1;
+		$text .= $disp->replace_vars( $skin, {}, 
+			$skin->{"bymonitor_newline.proto"} );
+	    }
+	    $text .= $disp->replace_vars( $skin, $agent, 
+		$skin->{"bymonitor_agent.proto"} );
+	}
+	my $host = (($check->{"HOST"} eq $formerhost)?"":$check->{"HOST"});
+	$formerhost = $check->{"HOST"};
+	$body .= $disp->replace_vars( $skin, {
+	    "HOST" => $host,
+	    "CHECK" => $check->{"CHECK"},
+	    "AGENTS"=>$text}, 
+	    $skin->{"bymonitor_element.proto"} );
+    }
+	    
+    $page->{"TEXT"} = $disp->replace_vars( $skin, {
+	"TITLE" => "Agents by Check",
+	"WHICH" => "bymonitor",
+	"TABLE_BODY" => $body,
+	"MTIME" => (scalar localtime( $BigSister::common::agentlog->{"mtime"} ))
+    }, $skin->{"admin_agentlog.proto"} );
+}
+
+
+sub checks_byagent {
+    my( $skin, $page, $cgivars ) = @_;
+
+    unless( load_agentlog() ) {
+	;
+    }
+    my $body = "";
+    my $check;
+    my $agent;
+    foreach $agent (sort 
+	{$BigSister::common::agentlog->{"agentnames"}->{$a} cmp $BigSister::common::agentlog->{"agentnames"}->{$b} }
+	keys %{$BigSister::common::agentlog->{"byagent"}}) {
+        my $checks;
+	my $text = "";
+
+	$checks = $BigSister::common::agentlog->{"byagent"}->{$agent};
+	my $i=1;
+	foreach $check (@$checks) {
+	    unless( $i++ % 4 ) {
+		$i=1;
+		$text .= $disp->replace_vars( $skin, {}, 
+			$skin->{"byagent_newline.proto"} );
+	    }
+	    $text .= $disp->replace_vars( $skin, $check, 
+		$skin->{"byagent_check.proto"} );
+	}
+	$body .= $disp->replace_vars( $skin, {
+	    "AGENT"=>$BigSister::common::agentlog->{"agentnames"}->{$agent},
+	    "CHECKS"=>$text}, 
+	    $skin->{"byagent_element.proto"} );
+    }
+	    
+    $page->{"TEXT"} = $disp->replace_vars( $skin, {
+	"TITLE" => "Checks by Agent",
+	"WHICH" => "byagent",
+	"TABLE_BODY" => $body,
+	"MTIME" => (scalar localtime( $BigSister::common::agentlog->{"mtime"} ))
+    }, $skin->{"admin_agentlog.proto"} );
+}
+
+
+sub load_agentlog {
+    my $file = $BigSister::common::fs{'var'}."/agent.log";
+
+    return(0) unless( -f $file );
+    my $mtime = ((stat($file))[9]);
+    return(1) if( defined $BigSister::common::agentlog
+	&& $mtime == $BigSister::common::agentlog->{"mtime"} );
+    $BigSister::common::agentlog = { 
+	"mtime" => $mtime,
+	"file" => $file,
+	"checks" => [],
+	"byagent" => {},
+	"agentnames" => {}
+    };
+    my @checks;
+    open( LOG, "<$file" );
+    while( <LOG> ) {
+	/^([^\s\t]+)\.([^\.\s\t]+)[\s\t]+/ || next;
+	my $host = $1;
+	my $check = $2;
+	$_ = $';
+	my @agents = ();
+
+	while( /^([^\s\t]+)[\s\t]+\(([0-9]+).*?\)[\s\t]+/ ) {
+	    my $agent = $1;
+	    my $time = $2;
+	    $_ = $';
+	    my $agentname = gethostbyaddr( inet_aton($agent), AF_INET );
+	    ($agentname = $agent) unless( $agentname );
+	    push( @agents, { "agentip" => $agent, 
+		"AGENT" => $agentname,
+		"TIME" => scalar localtime($time),
+		"time" => $time
+	    } );
+	    unless( defined $BigSister::common::agentlog->{"byagent"}->{$agent} ) {
+		$BigSister::common::agentlog->{"byagent"}->{$agent} = [];
+	    }
+	    push( @{$BigSister::common::agentlog->{"byagent"}->{$agent}}, {
+		"HOST" => $host,
+		"CHECK" => $check,
+		"TIME" => scalar localtime($time),
+		"time" => $time
+	    } );
+	    $BigSister::common::agentlog->{"agentnames"}->{$agent} = $agentname;
+	}
+	push( @checks, {
+	    "HOST" => $host,
+	    "CHECK" => $check,
+	    "agents" => \@agents
+	} );
+    }
+    $BigSister::common::agentlog->{"checks"} = \@checks;
+    close LOG;
+}
+
+
+# ====================== BB connections ============
+
+use Monitor::bb;
+
+sub send_cmd {
+    my( $display, $text ) = @_;
+    my( $port );
+
+    unless( $display eq $bbdisp ) {
+	if( $display =~ /:(.*)/ ) {
+	    $display = $`;
+	    $port = $1;
+	}
+	unless( $port ) {
+	    open( IN, "<$BigSister::common::fs{'var'}/grouping" );
+	    while( <IN> ) {
+		if( /^set port=(\d+)/ ) {
+		    $port = $1;
+		}
+	    }
+	    close IN;
+	}
+	$bbconn = Monitor::bb->new( $display, 10, $port );
+	$bbdisp = $display;
+    }
+    print "sending $text\n" if( $BigSister::common::dl );
+    $text =~ s/\n/\|\>/g;
+    $bbconn->sysreport( $text );
+    sleep 1;
+    $bbconn->_end_report();
+    return;
+}
+
+
+# ======================= Statusmon reqs ============-
+
+sub event {
+    ;
+}
+

@@ -1,0 +1,234 @@
+#!/usr/bin/perl
+#    Big Sister network monitor
+#    Copyright (C) 1998  Thomas Aeby
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+
+#=============================================================================
+#
+$BigSister::common::Usage	  = "[-D level] [-l logdir] [-b bigsisterdirectory]";
+#
+#=============================================================================
+
+use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/bin"; use lib "$ENV{BIGSISTER_CHROOT}/usr/local/lib/bs/uxmon"; #inslib
+@BigSister::common::options = ( "l:s", "c" );
+use BigSister::common;
+proginit();
+
+use strict;
+use Time::Local;
+use FileHandle;
+require bscgi;
+
+my %indexes = ();
+my $indexwidth = 32000;
+
+my $dl = $BigSister::common::dl;
+
+my $logdir = "$BigSister::common::fs{'web'}/logs";
+$logdir = $BigSister::common::opt_l if( $BigSister::common::opt_l );
+
+$BigSister::common::on_unix = Platforms::isunix();
+
+if( $BigSister::common::on_unix ) {
+    $ENV{PATH} = '/usr/ucb:/bin:/usr/bin:/sbin:/usr/sbin';
+}
+
+bscgi::mainloop( \&one_pass, "white_bg,static_lamps", 300 );
+
+
+sub one_pass {
+    my( $skin, %cgivars ) = @_;
+    my $month = 0;
+    my $year = 0;
+    my $day = 0;
+    my $host = "";
+    my $item = "";
+    my $toptime;
+    my $i;
+
+    $month = $cgivars{"MONTH"};
+    $year = $cgivars{"YEAR"};
+    $day = $cgivars{"DAY"};
+    $host = $cgivars{"HOST"};
+    $item = $cgivars{"ITEM"};
+     
+    unless( $month || length($year) || $day ) {
+	my( $sec,$min,$hour,$mday,$mon,$wyear,$wday,$yday,$isdst) = localtime( time-7*24*3600 );
+	$cgivars{"MONTH"} = $month = $mon+1;
+	$cgivars{"YEAR"} = $year = $wyear + 1900;
+	$cgivars{"DAY"} = $day = $mday;
+    }
+
+    ($month = 1) unless( $month );
+    ($year = 1970) unless( length($year) );
+    ($day = 1) unless( $day );
+    if( $year < 100 ) { 
+	$year += 2000;
+	$cgivars{"YEAR"} = $year;
+    }
+
+    my $time = timelocal(0,0,0,$day,$month-1,$year-1900);
+
+    if( $cgivars{"TIME"} ) {
+	$toptime = $cgivars{"TIME"};
+    }
+
+    my @files = (["$BigSister::common::fs{'var'}/display.history", time]);
+    opendir( DIR, "$BigSister::common::fs{'var'}" );
+    my $filename;
+    foreach $filename ( readdir( DIR ) ) {
+	next unless( $filename =~ /^display.history.\d+/ );
+	$filename = "$BigSister::common::fs{'var'}/$filename";
+	my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,
+	    $atime,$mtime,$ctime,$blksize,$blocks)
+	    = stat($filename);
+
+	if( (-f $filename) && ($mtime > $time) ) {
+	    unshift( @files, [$filename,$mtime] );
+	}
+    }
+    @files = map { $_->[0] } sort { $a->[1] <=> $b->[1] } @files;
+    print "Content-Type: text/html\n\n";
+    print history( $BigSister::common::display, $time, $toptime, $host, $item, $skin, \%cgivars, @files );
+}
+
+
+
+sub history {
+    my( $disp, $time, $toptime, $host, $item, $skin, $vars, @files ) = @_;
+    my( $read, $text, $i, $maxline );
+    my( $lhost, $litem, $lfrom, $lto, $ltime, $ltext, $ldate );
+    my( $counter );
+
+    my @text = ();
+    my @times = ();
+    $maxline = $skin->{"history_maxlines.inc"};
+    $i = 0;
+    if ( ! $host ) { $host = '\S+'; };
+    if ( ! $item ) { $item = '\S+?'; };
+    my $fh = new FileHandle();
+    foreach $read (@files) {
+	open( $fh, "<$read" );
+	binmode $fh;
+	seek_time( $fh, $read, $time );
+	while( <$fh> ) {
+	    # Force a match with $host and $item or discard the line
+	    /^($host)\.($item): ([a-z]*)->([a-z]*) \(([0-9]+)\)/ || next;
+	    ( $lhost, $litem, $lfrom, $lto, $ltime, $ltext ) = ( $1, $2, $3, $4, $5, $' );
+	    next if( $ltime < $time );
+	    if( $counter ) {
+		last unless( --$counter );
+	    }
+	    elsif( $toptime && ($ltime>$toptime) ) {
+		$counter = $maxline-2;
+	    }
+	    else {
+		if( $ltext =~ /^(.*? \d\d\d\d) (.*)$/ ) {
+		    ($ldate,$ltext) = ($1,$2);
+		}
+		else {
+		    $ldate = localtime($ltime);
+		}
+		unshift( @times, $ltime );
+		if( $vars->{"DETAILS"} eq "short" ) {
+		    $ltext =~ s/\&html.*//s;
+		    $ltext = substr( $ltext, 0, 40 );
+		    $ltext =~ s/(\n|\|\>)/ /s;
+		}
+		elsif( $vars->{"DETAILS"} ne "full" ) {
+		    $ltext =~ s/\&html.*//s;
+		    $ltext = substr( $ltext, 0, 240 );
+		    $vars->{"DETAILS"} = "normal";
+		}
+		$vars->{"DETAILSELECT".uc($vars->{"DETAILS"})} = "selected";
+		$ltext = $disp->fixHTMLinText( $ltext, 1 );
+		unshift( @text, $disp->replace_vars( $skin, {
+		    "HOST" => $lhost,
+		    "ITEM" => $litem,
+		    "FROM" => $lfrom,
+		    "TO" => $lto,
+		    "TIME" => $ltime,
+		    "DATE" => $ldate,
+		    "TEXT" => $ltext 
+		    }, $skin->{"history_entry.proto"} ) );
+	    }
+	}
+	close $fh;
+    }
+    splice( @text, $maxline );
+    $text = join( "", @text );
+    $text =~ s/\|\>/\<BR\>/g;
+    $vars->{"TEXT"} = $text;
+    $vars->{"UPTIME"} = $ltime;
+    if( $#times < $maxline-1 ) {
+	$vars->{"DOWNTIME"} = $times[$#times];
+    }
+    else {
+	$vars->{"DOWNTIME"} = $times[$maxline-1];
+    }
+
+    foreach $i ( keys %$vars ) {
+	$vars->{"ENC_".$i} = $disp->encode( $vars->{$i} );
+    }
+    return $disp->replace_vars( $skin, $vars, $skin->{"history.proto"} );
+}
+
+
+
+sub seek_time {
+    my( $fh, $file, $time ) = @_;
+
+    my $pos = where_time( $fh, $file, $time );
+    seek( $fh, $pos, 0 );
+}
+
+
+sub where_time {
+    my( $fh, $file, $time ) = @_;
+
+    my $index;
+    if( defined $indexes{$file} ) {
+        $index = $indexes{$file};
+    }
+    else {
+        $index = $indexes{$file} = [[0,0]];
+    }
+    for( my $i=0; $i<$#$index; $i++ ) {
+	return( $index->[$i]->[1] ) if( $index->[$i+1]->[0] >= $time );
+    }
+    my $orgpos = @$index ? ($index->[$#$index]->[1]) : 0;
+    my $size = ((stat( $file ))[9]);
+    my $pos;
+    seek( $fh, $orgpos, 0 ) || return $orgpos;
+    while( ($pos = $orgpos + $indexwidth) < $size ) {
+        seek( $fh, $indexwidth, 1 ) || return $orgpos;
+	my $line=<$fh>;
+	my $newpos = tell( $fh );
+	while( <$fh> ) {
+	    /^(\S+)\.(\S+): ([a-z]*)->([a-z]*) \(([0-9]+)\)/ || next;
+	    my( $lhost, $litem, $lfrom, $lto, $ltime, $ltext ) = ( $1, $2, $3, $4, $5, $' );
+	    push( @$index, [ $ltime, $newpos ] );
+	    ( $ltime >= $time ) && return $orgpos;
+	    last;
+        }
+	$_ || return $orgpos;
+	$orgpos = $newpos;
+    }
+    return $orgpos;
+}
+	    
+
